@@ -1,6 +1,9 @@
 import axios from "axios";
 
-const client = axios.create({ baseURL: "/api" });
+// const client = axios.create({ baseURL: "/api" });
+const client = axios.create({ 
+  baseURL: "https://timber-storage-pro-production-fd55.up.railway.app/api" 
+});
 
 client.interceptors.request.use((config) => {
   const token = localStorage.getItem("tsp_access_token");
