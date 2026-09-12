@@ -1,6 +1,6 @@
 import React, { useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { Package, Eye, EyeOff, ShieldCheck } from "lucide-react";
+import { useNavigate, Link } from "react-router-dom";
+import { Package, Eye, EyeOff, ShieldCheck, UserPlus } from "lucide-react";
 import { useApp } from "../context/AppContext.jsx";
 import { Button, Input } from "../components/ui.jsx";
 
@@ -94,10 +94,23 @@ export default function Login() {
           </Button>
         </form>
 
-        <div className="mt-4 flex items-center justify-center gap-1.5 text-xs text-stone-500">
+        {/* "Create Account" only ever does something the first time this app
+            is ever run — /setup is permanently locked out (redirects back to
+            /login) the moment a Super Admin account already exists, so this
+            link is effectively a no-op after that point rather than a way to
+            register a second account. Left visible per request; if that's
+            not the intended behavior, this is the line to gate/remove. */}
+        <Link
+          to="/setup"
+          className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-stone-800 bg-stone-900/60 px-4 py-2.5 text-sm font-medium text-stone-300 backdrop-blur transition-colors hover:bg-stone-800"
+        >
+          <UserPlus className="h-4 w-4" /> Create Account
+        </Link>
+
+        {/* <div className="mt-4 flex items-center justify-center gap-1.5 text-xs text-stone-500">
           <ShieldCheck className="h-3.5 w-3.5" />
           Every warehouse is access-controlled and fully audited.
-        </div>
+        </div> */}
 
         {/* <div className="mt-5 rounded-xl border border-stone-800 bg-stone-900/60 p-4 text-xs text-stone-400 backdrop-blur">
           <p className="mb-1 font-semibold text-stone-300">Demo accounts (after running the seed script):</p>

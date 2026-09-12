@@ -2,7 +2,7 @@ import axios from "axios";
 
 // const client = axios.create({ baseURL: "/api" });
 const client = axios.create({ 
-  baseURL: "https://timber-storage-pro-production-fd55.up.railway.app/api" 
+  baseURL: "https://timber-storage-pro-production-fd55.up.railway.app/api"
 });
 
 client.interceptors.request.use((config) => {
