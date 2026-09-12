@@ -99,12 +99,12 @@ export default function Login() {
           Every warehouse is access-controlled and fully audited.
         </div>
 
-        <div className="mt-5 rounded-xl border border-stone-800 bg-stone-900/60 p-4 text-xs text-stone-400 backdrop-blur">
+        {/* <div className="mt-5 rounded-xl border border-stone-800 bg-stone-900/60 p-4 text-xs text-stone-400 backdrop-blur">
           <p className="mb-1 font-semibold text-stone-300">Demo accounts (after running the seed script):</p>
           <p>admin / admin123 — Super Admin</p>
           <p>manager / manager123 — Branch Manager</p>
           <p>staff / staff123 — Staff</p>
-        </div>
+        </div> */}
       </div>
     </div>
   );
