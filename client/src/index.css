@@ -1,0 +1,85 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Slightly smaller, tighter baseline for a denser, more modern feel across
+   every rem-based Tailwind size — one change instead of hand-editing every
+   text-* class throughout the app. */
+html { font-size: 15px; }
+
+html, body, #root { height: 100%; }
+body {
+  -webkit-tap-highlight-color: transparent;
+  letter-spacing: -0.01em;
+}
+
+* { -webkit-font-smoothing: antialiased; }
+
+/* Touch targets: min 48x48 per spec (measured in real px, independent of
+   the reduced root font-size above). */
+.touch-target { min-height: 48px; min-width: 48px; }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: rgba(120,94,60,0.35); border-radius: 8px; }
+
+/* Futuristic accents: soft glow on primary surfaces + a subtle animated
+   gradient used sparingly (login, empty hero states) for a modern feel
+   without turning the whole app neon. */
+.glow-ring {
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.15), 0 8px 24px -8px rgba(124, 94, 60, 0.35);
+}
+.futuristic-gradient {
+  background: radial-gradient(circle at 20% -10%, rgba(56, 189, 248, 0.12), transparent 45%),
+    radial-gradient(circle at 100% 0%, rgba(124, 94, 60, 0.15), transparent 40%);
+}
+.grid-fade {
+  background-image: linear-gradient(rgba(120, 94, 60, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(120, 94, 60, 0.06) 1px, transparent 1px);
+  background-size: 32px 32px;
+  mask-image: radial-gradient(ellipse at top, black 0%, transparent 70%);
+}
+
+/* ---------------------------------------------------------------------
+   PRINTING
+   Two layers:
+   1. `.no-print` (or Tailwind's `print:hidden`) hides app chrome globally
+      (sidebar, headers, bottom nav) on every print.
+   2. `.print-scoped` + `.print-scope-target` (toggled by lib/print.js)
+      restricts a print run to ONE specific section — e.g. a single
+      container's card — hiding literally everything else on the page,
+      including any other visible cards, so the printed page contains only
+      that record. A minimal company-name header and developer-name footer
+      are injected for the duration of that print only.
+   --------------------------------------------------------------------- */
+.print-header-name, .print-footer-dev { display: none; }
+
+@media print {
+  .no-print { display: none !important; }
+  body { background: white !important; }
+
+  body.print-scoped * { visibility: hidden !important; }
+  body.print-scoped .print-scope-target,
+  body.print-scoped .print-scope-target * { visibility: visible !important; }
+  body.print-scoped .print-scope-target {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    padding: 18px 24px 40px;
+    box-shadow: none !important;
+    border: none !important;
+  }
+
+  body.print-scoped .print-header-name,
+  body.print-scoped .print-footer-dev {
+    display: block !important;
+    visibility: visible !important;
+    position: fixed;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-size: 11px;
+    color: #444;
+  }
+  body.print-scoped .print-header-name { top: 6px; font-weight: 700; font-size: 13px; }
+  body.print-scoped .print-footer-dev { bottom: 6px; }
+}
