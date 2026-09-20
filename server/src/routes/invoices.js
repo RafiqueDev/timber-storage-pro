@@ -10,13 +10,13 @@ import { calculateContainerRent, billingReferenceDate, daysBetween, breakdownDur
 const router = Router();
 router.use(authenticate);
 
-function nextDocumentNumber(prefixOverride) {
-  const company = db.prepare("SELECT * FROM companies WHERE id='default'").get();
+function nextDocumentNumber(companyId, prefixOverride) {
+  const company = db.prepare("SELECT * FROM companies WHERE id = ?").get(companyId);
   const seq = company.next_invoice_seq;
   const year = new Date().getFullYear();
   const prefix = prefixOverride || company.invoice_prefix;
   const number = `${prefix}-${year}-${String(seq).padStart(6, "0")}`;
-  db.prepare("UPDATE companies SET next_invoice_seq = next_invoice_seq + 1 WHERE id='default'").run();
+  db.prepare("UPDATE companies SET next_invoice_seq = next_invoice_seq + 1 WHERE id = ?").run(companyId);
   return number;
 }
 
@@ -33,11 +33,13 @@ router.get(
   asyncHandler(async (req, res) => {
     const { party_id, warehouse_id } = req.query;
     if (!party_id) return fail(res, "party_id is required.", 400);
+    const party = db.prepare("SELECT id, company_id FROM parties WHERE id = ?").get(party_id);
+    if (!party || party.company_id !== req.companyId) return fail(res, "Party not found.", 404);
     if (warehouse_id && req.user.role !== "SUPER_ADMIN" && !req.userWarehouseIds.includes(warehouse_id)) {
       return fail(res, "You do not have permission to access this warehouse.", 403);
     }
-    let sql = "SELECT * FROM containers WHERE party_id = ? AND status IN ('Active','Cleared')";
-    const params = [party_id];
+    let sql = "SELECT * FROM containers WHERE company_id = ? AND party_id = ? AND status IN ('Active','Cleared')";
+    const params = [req.companyId, party_id];
     if (warehouse_id) {
       sql += " AND warehouse_id = ?";
       params.push(warehouse_id);
@@ -109,8 +111,8 @@ router.get(
     const { warehouse_id, party_id, status, search } = req.query;
     let sql = `SELECT i.*, p.party_name, w.branch_name FROM invoices i
                JOIN parties p ON p.id = i.party_id
-               JOIN warehouses w ON w.id = i.warehouse_id WHERE 1=1`;
-    const params = [];
+               JOIN warehouses w ON w.id = i.warehouse_id WHERE i.company_id = ?`;
+    const params = [req.companyId];
     if (warehouse_id) {
       sql += " AND i.warehouse_id = ?";
       params.push(warehouse_id);
@@ -140,7 +142,7 @@ router.get(
   "/:id",
   asyncHandler(async (req, res) => {
     const inv = db.prepare("SELECT * FROM invoices WHERE id = ?").get(req.params.id);
-    if (!inv) return fail(res, "Invoice not found.", 404);
+    if (!inv || inv.company_id !== req.companyId) return fail(res, "Invoice not found.", 404);
     if (req.user.role !== "SUPER_ADMIN" && !req.userWarehouseIds.includes(inv.warehouse_id)) {
       return fail(res, "You do not have permission to access this warehouse.", 403);
     }
@@ -149,7 +151,7 @@ router.get(
     const items = db.prepare("SELECT * FROM invoice_items WHERE invoice_id = ?").all(inv.id);
     const payments = db.prepare("SELECT * FROM payments WHERE invoice_id = ? ORDER BY payment_date").all(inv.id);
     const adjustments = db.prepare("SELECT * FROM invoices WHERE adjustment_for = ? ORDER BY invoice_date").all(inv.id);
-    const company = db.prepare("SELECT * FROM companies WHERE id='default'").get();
+    const company = db.prepare("SELECT * FROM companies WHERE id = ?").get(req.companyId);
     ok(res, {
       ...inv,
       party,
@@ -179,7 +181,7 @@ router.put(
   "/:id",
   asyncHandler(async (req, res) => {
     const inv = db.prepare("SELECT * FROM invoices WHERE id = ?").get(req.params.id);
-    if (!inv) return fail(res, "Invoice not found.", 404);
+    if (!inv || inv.company_id !== req.companyId) return fail(res, "Invoice not found.", 404);
     if (req.user.role !== "SUPER_ADMIN" && !req.userWarehouseIds.includes(inv.warehouse_id)) {
       return fail(res, "You do not have permission to access this warehouse.", 403);
     }
@@ -259,6 +261,12 @@ router.post(
     if (req.user.role !== "SUPER_ADMIN" && !req.userWarehouseIds.includes(warehouse_id)) {
       return fail(res, "You do not have permission to access this warehouse.", 403);
     }
+    const warehouse = db.prepare("SELECT id, company_id FROM warehouses WHERE id = ?").get(warehouse_id);
+    if (!warehouse || warehouse.company_id !== req.companyId) {
+      return fail(res, "You do not have permission to access this warehouse.", 403);
+    }
+    const party = db.prepare("SELECT id, company_id FROM parties WHERE id = ?").get(party_id);
+    if (!party || party.company_id !== req.companyId) return fail(res, "Party not found.", 404);
     if (!Array.isArray(lines) || lines.length === 0) return fail(res, "Select at least one container to bill.", 400);
 
     const today = new Date().toISOString().slice(0, 10);
@@ -271,7 +279,7 @@ router.post(
 
     for (const line of lines) {
       const c = db.prepare("SELECT * FROM containers WHERE id = ?").get(line.container_id);
-      if (!c || c.party_id !== party_id || c.warehouse_id !== warehouse_id) {
+      if (!c || c.company_id !== req.companyId || c.party_id !== party_id || c.warehouse_id !== warehouse_id) {
         return fail(res, "One or more selected containers are invalid for this party/warehouse.", 400);
       }
       const referenceEnd = billingReferenceDate(c, today);
@@ -312,13 +320,13 @@ router.post(
     }
 
     const invoiceId = nanoid();
-    const invoiceNumber = nextDocumentNumber();
+    const invoiceNumber = nextDocumentNumber(req.companyId);
 
     const txn = db.transaction(() => {
       db.prepare(
-        `INSERT INTO invoices (id, invoice_number, warehouse_id, party_id, invoice_date, billing_period_start, billing_period_end, subtotal, paid_amount, balance, status, type, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'Generated', 'Invoice', ?)`
-      ).run(invoiceId, invoiceNumber, warehouse_id, party_id, invDate, periodStartMin, periodEndMax, subtotal, subtotal, req.user.id);
+        `INSERT INTO invoices (id, company_id, invoice_number, warehouse_id, party_id, invoice_date, billing_period_start, billing_period_end, subtotal, paid_amount, balance, status, type, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'Generated', 'Invoice', ?)`
+      ).run(invoiceId, req.companyId, invoiceNumber, warehouse_id, party_id, invDate, periodStartMin, periodEndMax, subtotal, subtotal, req.user.id);
 
       for (const item of items) {
         db.prepare(
@@ -344,13 +352,15 @@ router.post(
       // credit instead of netting it immediately: it sits unused until the
       // party's NEXT bill, then reduces what's owed on it, oldest credit
       // first, applied like a payment so status/balance logic stays unified.
+      // Scoped to company_id too, even though party_id alone would already
+      // be company-unique — belt and suspenders on the tenant boundary.
       if (subtotal > 0) {
         const availableCredits = db
           .prepare(
-            `SELECT * FROM invoices WHERE party_id = ? AND type = 'CreditNote' AND status != 'Cancelled' AND credit_remaining > 0
+            `SELECT * FROM invoices WHERE company_id = ? AND party_id = ? AND type = 'CreditNote' AND status != 'Cancelled' AND credit_remaining > 0
              ORDER BY invoice_date ASC, created_at ASC`
           )
-          .all(party_id);
+          .all(req.companyId, party_id);
 
         let remainingToCover = subtotal;
         let totalApplied = 0;
@@ -361,9 +371,9 @@ router.post(
 
           const paymentId = nanoid();
           db.prepare(
-            `INSERT INTO payments (id, invoice_id, party_id, warehouse_id, amount, payment_date, payment_method, reference, notes, received_by)
-             VALUES (?, ?, ?, ?, ?, ?, 'Credit Note', ?, ?, ?)`
-          ).run(paymentId, invoiceId, party_id, warehouse_id, applyAmount, invDate, credit.invoice_number, `Auto-applied banked credit from ${credit.invoice_number}`, req.user.id);
+            `INSERT INTO payments (id, company_id, invoice_id, party_id, warehouse_id, amount, payment_date, payment_method, reference, notes, received_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'Credit Note', ?, ?, ?)`
+          ).run(paymentId, req.companyId, invoiceId, party_id, warehouse_id, applyAmount, invDate, credit.invoice_number, `Auto-applied banked credit from ${credit.invoice_number}`, req.user.id);
 
           db.prepare(`UPDATE invoices SET credit_remaining = credit_remaining - ?, updated_at = datetime('now') WHERE id = ?`).run(applyAmount, credit.id);
           db.prepare(
@@ -401,10 +411,10 @@ router.post(
     notifyInvoiceGenerated(invoice, req.user.id);
 
     const savedItems = db.prepare("SELECT * FROM invoice_items WHERE invoice_id = ?").all(invoiceId);
-    const party = db.prepare("SELECT * FROM parties WHERE id = ?").get(party_id);
-    const warehouse = db.prepare("SELECT * FROM warehouses WHERE id = ?").get(warehouse_id);
-    const company = db.prepare("SELECT * FROM companies WHERE id='default'").get();
-    ok(res, { ...invoice, items: savedItems, party, warehouse, company }, 201);
+    const partyRow = db.prepare("SELECT * FROM parties WHERE id = ?").get(party_id);
+    const warehouseRow = db.prepare("SELECT * FROM warehouses WHERE id = ?").get(warehouse_id);
+    const company = db.prepare("SELECT * FROM companies WHERE id = ?").get(req.companyId);
+    ok(res, { ...invoice, items: savedItems, party: partyRow, warehouse: warehouseRow, company }, 201);
   })
 );
 
@@ -412,7 +422,7 @@ router.post(
   "/:id/cancel",
   asyncHandler(async (req, res) => {
     const inv = db.prepare("SELECT * FROM invoices WHERE id = ?").get(req.params.id);
-    if (!inv) return fail(res, "Invoice not found.", 404);
+    if (!inv || inv.company_id !== req.companyId) return fail(res, "Invoice not found.", 404);
     if (req.user.role !== "SUPER_ADMIN" && !req.userWarehouseIds.includes(inv.warehouse_id)) {
       return fail(res, "You do not have permission to access this warehouse.", 403);
     }
@@ -438,7 +448,7 @@ router.post(
   "/:id/adjust",
   asyncHandler(async (req, res) => {
     const inv = db.prepare("SELECT * FROM invoices WHERE id = ?").get(req.params.id);
-    if (!inv) return fail(res, "Invoice not found.", 404);
+    if (!inv || inv.company_id !== req.companyId) return fail(res, "Invoice not found.", 404);
     if (req.user.role !== "SUPER_ADMIN" && !req.userWarehouseIds.includes(inv.warehouse_id)) {
       return fail(res, "You do not have permission to access this warehouse.", 403);
     }
@@ -452,12 +462,13 @@ router.post(
     if (!reason?.trim()) return fail(res, "Please provide a reason for this adjustment.", 400);
 
     const creditNoteId = nanoid();
-    const creditNoteNumber = nextDocumentNumber("CN");
+    const creditNoteNumber = nextDocumentNumber(req.companyId, "CN");
     db.prepare(
-      `INSERT INTO invoices (id, invoice_number, warehouse_id, party_id, invoice_date, billing_period_start, billing_period_end, subtotal, paid_amount, balance, credit_remaining, status, type, adjustment_for, adjustment_reason, created_by)
-       VALUES (?, ?, ?, ?, date('now'), ?, ?, ?, 0, 0, ?, 'Generated', 'CreditNote', ?, ?, ?)`
+      `INSERT INTO invoices (id, company_id, invoice_number, warehouse_id, party_id, invoice_date, billing_period_start, billing_period_end, subtotal, paid_amount, balance, credit_remaining, status, type, adjustment_for, adjustment_reason, created_by)
+       VALUES (?, ?, ?, ?, ?, date('now'), ?, ?, ?, 0, 0, ?, 'Generated', 'CreditNote', ?, ?, ?)`
     ).run(
       creditNoteId,
+      req.companyId,
       creditNoteNumber,
       inv.warehouse_id,
       inv.party_id,
@@ -495,7 +506,7 @@ router.delete(
   "/:id",
   asyncHandler(async (req, res) => {
     const inv = db.prepare("SELECT * FROM invoices WHERE id = ?").get(req.params.id);
-    if (!inv) return fail(res, "Invoice not found.", 404);
+    if (!inv || inv.company_id !== req.companyId) return fail(res, "Invoice not found.", 404);
     if (req.user.role !== "SUPER_ADMIN" && !req.userWarehouseIds.includes(inv.warehouse_id)) {
       return fail(res, "You do not have permission to access this warehouse.", 403);
     }

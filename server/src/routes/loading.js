@@ -43,8 +43,8 @@ router.get(
                JOIN containers c ON c.id = l.container_id
                JOIN parties p ON p.id = l.party_id
                JOIN warehouses w ON w.id = l.warehouse_id
-               WHERE 1=1`;
-    const params = [];
+               WHERE l.company_id = ?`;
+    const params = [req.companyId];
     if (warehouse_id) {
       sql += " AND l.warehouse_id = ?";
       params.push(warehouse_id);
@@ -87,7 +87,7 @@ router.post(
   asyncHandler(async (req, res) => {
     const { container_id, date_of_loading, packets_loaded, vehicle_number, driver_number, description } = req.body;
     const container = db.prepare("SELECT * FROM containers WHERE id = ?").get(container_id);
-    if (!container) return fail(res, "Invalid container.", 400);
+    if (!container || container.company_id !== req.companyId) return fail(res, "Invalid container.", 400);
     if (req.user.role !== "SUPER_ADMIN" && !req.userWarehouseIds.includes(container.warehouse_id)) {
       return fail(res, "You do not have permission to access this warehouse.", 403);
     }
@@ -117,10 +117,11 @@ router.post(
       }
       const logId = nanoid();
       db.prepare(
-        `INSERT INTO loading_logs (id, container_id, warehouse_id, party_id, date_of_loading, packets_loaded, vehicle_number, driver_number, description, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO loading_logs (id, company_id, container_id, warehouse_id, party_id, date_of_loading, packets_loaded, vehicle_number, driver_number, description, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         logId,
+        req.companyId,
         container_id,
         container.warehouse_id,
         container.party_id,
@@ -196,7 +197,7 @@ router.put(
   "/:id",
   asyncHandler(async (req, res) => {
     const log = db.prepare("SELECT * FROM loading_logs WHERE id = ?").get(req.params.id);
-    if (!log) return fail(res, "Loading record not found.", 404);
+    if (!log || log.company_id !== req.companyId) return fail(res, "Loading record not found.", 404);
     const container = db.prepare("SELECT * FROM containers WHERE id = ?").get(log.container_id);
     if (!container) return fail(res, "Container not found.", 404);
     if (req.user.role !== "SUPER_ADMIN" && !req.userWarehouseIds.includes(container.warehouse_id)) {
@@ -255,7 +256,7 @@ router.delete(
   "/:id",
   asyncHandler(async (req, res) => {
     const log = db.prepare("SELECT * FROM loading_logs WHERE id = ?").get(req.params.id);
-    if (!log) return fail(res, "Loading record not found.", 404);
+    if (!log || log.company_id !== req.companyId) return fail(res, "Loading record not found.", 404);
     const container = db.prepare("SELECT * FROM containers WHERE id = ?").get(log.container_id);
     if (!container) return fail(res, "Container not found.", 404);
     if (req.user.role !== "SUPER_ADMIN" && !req.userWarehouseIds.includes(container.warehouse_id)) {

@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS warehouses (
 
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL,
   name TEXT NOT NULL,
   username TEXT UNIQUE NOT NULL,
   email TEXT,
@@ -61,6 +62,7 @@ CREATE TABLE IF NOT EXISTS user_warehouses (
 
 CREATE TABLE IF NOT EXISTS parties (
   id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL,
   party_name TEXT NOT NULL,
   contact_person TEXT,
   phone TEXT,
@@ -74,6 +76,7 @@ CREATE TABLE IF NOT EXISTS parties (
 
 CREATE TABLE IF NOT EXISTS containers (
   id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL,
   warehouse_id TEXT NOT NULL,
   party_id TEXT NOT NULL,
   container_number TEXT NOT NULL,
@@ -97,6 +100,7 @@ CREATE INDEX IF NOT EXISTS idx_containers_unload_date ON containers(date_of_unlo
 
 CREATE TABLE IF NOT EXISTS loading_logs (
   id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL,
   container_id TEXT NOT NULL,
   warehouse_id TEXT NOT NULL,
   party_id TEXT NOT NULL,
@@ -113,7 +117,8 @@ CREATE INDEX IF NOT EXISTS idx_loading_container ON loading_logs(container_id);
 
 CREATE TABLE IF NOT EXISTS invoices (
   id TEXT PRIMARY KEY,
-  invoice_number TEXT UNIQUE NOT NULL,
+  company_id TEXT NOT NULL,
+  invoice_number TEXT NOT NULL,
   warehouse_id TEXT NOT NULL,
   party_id TEXT NOT NULL,
   invoice_date TEXT NOT NULL,
@@ -126,13 +131,13 @@ CREATE TABLE IF NOT EXISTS invoices (
   type TEXT DEFAULT 'Invoice', -- Invoice | CreditNote
   adjustment_for TEXT, -- invoice_id this credit note corrects, if type = CreditNote
   adjustment_reason TEXT,
+  credit_remaining REAL,
   created_by TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_invoice_number ON invoices(invoice_number);
 CREATE INDEX IF NOT EXISTS idx_invoices_party ON invoices(party_id);
-CREATE INDEX IF NOT EXISTS idx_invoices_adjustment_for ON invoices(adjustment_for);
 
 CREATE TABLE IF NOT EXISTS invoice_items (
   id TEXT PRIMARY KEY,
@@ -151,6 +156,7 @@ CREATE INDEX IF NOT EXISTS idx_invoice_items_invoice ON invoice_items(invoice_id
 
 CREATE TABLE IF NOT EXISTS payments (
   id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL,
   invoice_id TEXT NOT NULL,
   party_id TEXT NOT NULL,
   warehouse_id TEXT NOT NULL,
@@ -180,6 +186,7 @@ CREATE INDEX IF NOT EXISTS idx_credit_applications_invoice ON credit_application
 
 CREATE TABLE IF NOT EXISTS audit_logs (
   id TEXT PRIMARY KEY,
+  company_id TEXT,
   user_id TEXT,
   user_name TEXT,
   action TEXT NOT NULL,
@@ -207,6 +214,7 @@ CREATE TABLE IF NOT EXISTS notifications (
 -- password pair share that same expiry.
 CREATE TABLE IF NOT EXISTS party_portal_access (
   id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL,
   party_id TEXT NOT NULL,
   username TEXT NOT NULL,
   password_hash TEXT NOT NULL,
@@ -245,5 +253,112 @@ addColumnIfMissing("invoices", "type", "TEXT DEFAULT 'Invoice'");
 addColumnIfMissing("invoices", "adjustment_for", "TEXT");
 addColumnIfMissing("invoices", "adjustment_reason", "TEXT");
 addColumnIfMissing("invoices", "credit_remaining", "REAL");
+
+// --- Multi-tenant migration (existing single-tenant installs) ---
+// Older installs had exactly one company row with id='default' and no
+// company_id on users/parties/containers/loading_logs/invoices/payments/
+// audit_logs/party_portal_access. Backfill those columns to 'default' so an
+// upgrade doesn't orphan existing data — every pre-existing row becomes
+// owned by the 'default' company, which continues to work exactly as before.
+addColumnIfMissing("users", "company_id", "TEXT");
+addColumnIfMissing("parties", "company_id", "TEXT");
+addColumnIfMissing("containers", "company_id", "TEXT");
+addColumnIfMissing("loading_logs", "company_id", "TEXT");
+addColumnIfMissing("invoices", "company_id", "TEXT");
+addColumnIfMissing("payments", "company_id", "TEXT");
+addColumnIfMissing("audit_logs", "company_id", "TEXT");
+addColumnIfMissing("party_portal_access", "company_id", "TEXT");
+
+const hasDefaultCompany = db.prepare("SELECT id FROM companies WHERE id = 'default'").get();
+if (hasDefaultCompany) {
+  db.prepare("UPDATE users SET company_id = 'default' WHERE company_id IS NULL").run();
+  db.prepare("UPDATE parties SET company_id = 'default' WHERE company_id IS NULL").run();
+  db.prepare("UPDATE containers SET company_id = 'default' WHERE company_id IS NULL").run();
+  db.prepare("UPDATE loading_logs SET company_id = 'default' WHERE company_id IS NULL").run();
+  db.prepare("UPDATE invoices SET company_id = 'default' WHERE company_id IS NULL").run();
+  db.prepare("UPDATE payments SET company_id = 'default' WHERE company_id IS NULL").run();
+  db.prepare("UPDATE audit_logs SET company_id = 'default' WHERE company_id IS NULL").run();
+  db.prepare("UPDATE party_portal_access SET company_id = 'default' WHERE company_id IS NULL").run();
+}
+
+// --- Drop the legacy GLOBAL unique constraint on invoices.invoice_number ---
+// The original single-tenant schema declared `invoice_number TEXT UNIQUE`
+// directly on the column. That's wrong once multiple companies exist: each
+// company generates its own sequence starting at 1, so two companies both
+// legitimately produce "INV-2026-000001" and the second insert would fail
+// with a UNIQUE constraint error. A column-level constraint can't be
+// dropped with ALTER TABLE in SQLite, so for existing databases we rebuild
+// the table without it, preserving every row, then re-create the correct
+// per-company unique index. Fresh installs already get the right shape from
+// the CREATE TABLE above and skip this entirely.
+const invoicesTableSql =
+  db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='invoices'").get()?.sql || "";
+if (/invoice_number\s+TEXT\s+UNIQUE/i.test(invoicesTableSql)) {
+  const rebuild = db.transaction(() => {
+    db.exec("PRAGMA foreign_keys = OFF");
+    db.exec(`
+      CREATE TABLE invoices_new (
+        id TEXT PRIMARY KEY,
+        company_id TEXT NOT NULL,
+        invoice_number TEXT NOT NULL,
+        warehouse_id TEXT NOT NULL,
+        party_id TEXT NOT NULL,
+        invoice_date TEXT NOT NULL,
+        billing_period_start TEXT NOT NULL,
+        billing_period_end TEXT NOT NULL,
+        subtotal REAL NOT NULL,
+        paid_amount REAL DEFAULT 0,
+        balance REAL NOT NULL,
+        status TEXT DEFAULT 'Generated',
+        type TEXT DEFAULT 'Invoice',
+        adjustment_for TEXT,
+        adjustment_reason TEXT,
+        credit_remaining REAL,
+        created_by TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    db.exec(`
+      INSERT INTO invoices_new (id, company_id, invoice_number, warehouse_id, party_id, invoice_date,
+        billing_period_start, billing_period_end, subtotal, paid_amount, balance, status, type,
+        adjustment_for, adjustment_reason, credit_remaining, created_by, created_at, updated_at)
+      SELECT id, COALESCE(company_id,'default'), invoice_number, warehouse_id, party_id, invoice_date,
+        billing_period_start, billing_period_end, subtotal, paid_amount, balance, status,
+        COALESCE(type,'Invoice'), adjustment_for, adjustment_reason, credit_remaining, created_by,
+        created_at, updated_at
+      FROM invoices;
+    `);
+    db.exec("DROP TABLE invoices");
+    db.exec("ALTER TABLE invoices_new RENAME TO invoices");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_invoice_number ON invoices(invoice_number)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_invoices_party ON invoices(party_id)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_invoices_adjustment_for ON invoices(adjustment_for)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_invoices_company ON invoices(company_id)");
+    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_invoice_number_per_company ON invoices(company_id, invoice_number)");
+    db.exec("PRAGMA foreign_keys = ON");
+  });
+  rebuild();
+}
+
+// --- Company-scoped indexes ---
+// Created here, AFTER the ALTER TABLE migrations above, because on a legacy
+// single-tenant database the company_id columns these reference don't exist
+// until those migrations have run. Fresh installs reach this point with the
+// columns already present from the CREATE TABLE block, so either path ends
+// up with exactly the same set of indexes.
+db.exec(`
+CREATE INDEX IF NOT EXISTS idx_parties_company ON parties(company_id);
+CREATE INDEX IF NOT EXISTS idx_containers_company ON containers(company_id);
+CREATE INDEX IF NOT EXISTS idx_loading_company ON loading_logs(company_id);
+CREATE INDEX IF NOT EXISTS idx_invoices_company ON invoices(company_id);
+CREATE INDEX IF NOT EXISTS idx_invoices_adjustment_for ON invoices(adjustment_for);
+CREATE INDEX IF NOT EXISTS idx_payments_company ON payments(company_id);
+CREATE INDEX IF NOT EXISTS idx_audit_company ON audit_logs(company_id);
+-- Invoice numbers are unique per-company, not globally: two different
+-- companies each generate their own sequence starting at 1, so
+-- "INV-2026-000001" legitimately exists once per company.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_invoice_number_per_company ON invoices(company_id, invoice_number);
+`);
 
 export default db;

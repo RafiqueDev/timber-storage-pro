@@ -16,13 +16,21 @@ router.get(
       if (req.user.role !== "SUPER_ADMIN" && !req.userWarehouseIds.includes(warehouseId)) {
         return fail(res, "You do not have permission to access this warehouse.", 403);
       }
+      const warehouse = db.prepare("SELECT id, company_id FROM warehouses WHERE id = ?").get(warehouseId);
+      if (!warehouse || warehouse.company_id !== req.companyId) {
+        return fail(res, "You do not have permission to access this warehouse.", 403);
+      }
       scope = [warehouseId];
     } else if (req.user.role !== "SUPER_ADMIN") {
       scope = req.userWarehouseIds;
     }
 
-    let containerSql = "SELECT * FROM containers WHERE 1=1";
-    const params = [];
+    // company_id is always the mandatory primary filter below, regardless
+    // of role or whether a specific warehouse scope narrows it further —
+    // this is what stops a Super Admin's "no warehouse selected" view from
+    // ever silently aggregating another company's data alongside their own.
+    let containerSql = "SELECT * FROM containers WHERE company_id = ?";
+    const params = [req.companyId];
     if (scope) {
       if (!scope.length) {
         return ok(res, {
@@ -50,24 +58,24 @@ router.get(
       return sum + calculateContainerRent({ rentType: c.rent_type, rentRate: c.rent_rate, billableDays: days });
     }, 0);
 
-    let todaysLoadingSql = "SELECT COALESCE(SUM(packets_loaded),0) s FROM loading_logs WHERE date_of_loading = ?";
-    const tlParams = [today];
+    let todaysLoadingSql = "SELECT COALESCE(SUM(packets_loaded),0) s FROM loading_logs WHERE company_id = ? AND date_of_loading = ?";
+    const tlParams = [req.companyId, today];
     if (scope) {
       todaysLoadingSql += ` AND warehouse_id IN (${scope.map(() => "?").join(",")})`;
       tlParams.push(...scope);
     }
     const todaysLoading = db.prepare(todaysLoadingSql).get(...tlParams).s;
 
-    let outstandingSql = "SELECT COALESCE(SUM(balance),0) s FROM invoices WHERE status != 'Cancelled'";
-    const obParams = [];
+    let outstandingSql = "SELECT COALESCE(SUM(balance),0) s FROM invoices WHERE company_id = ? AND status != 'Cancelled'";
+    const obParams = [req.companyId];
     if (scope) {
       outstandingSql += ` AND warehouse_id IN (${scope.map(() => "?").join(",")})`;
       obParams.push(...scope);
     }
     const outstandingBills = db.prepare(outstandingSql).get(...obParams).s;
 
-    let auditSql = "SELECT * FROM audit_logs WHERE 1=1";
-    const auditParams = [];
+    let auditSql = "SELECT * FROM audit_logs WHERE company_id = ?";
+    const auditParams = [req.companyId];
     if (scope) {
       auditSql += ` AND (warehouse_id IN (${scope.map(() => "?").join(",")}) OR warehouse_id IS NULL)`;
       auditParams.push(...scope);

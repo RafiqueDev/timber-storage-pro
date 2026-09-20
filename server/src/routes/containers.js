@@ -33,8 +33,13 @@ router.get(
   authorizeWarehouse((req) => req.query.warehouse_id),
   asyncHandler(async (req, res) => {
     const { warehouse_id, party_id, status, search } = req.query;
-    let sql = "SELECT * FROM containers WHERE 1=1";
-    const params = [];
+    // company_id is always the primary filter, regardless of role — every
+    // other condition below only ever narrows further within it. This is a
+    // deliberate second layer on top of authorizeWarehouse: even if the
+    // warehouse-scoping logic had a bug, a cross-company leak still isn't
+    // possible here.
+    let sql = "SELECT * FROM containers WHERE company_id = ?";
+    const params = [req.companyId];
     if (warehouse_id) {
       sql += " AND warehouse_id = ?";
       params.push(warehouse_id);
@@ -65,7 +70,7 @@ router.get(
   "/:id",
   asyncHandler(async (req, res) => {
     const c = db.prepare("SELECT * FROM containers WHERE id = ?").get(req.params.id);
-    if (!c) return fail(res, "Container not found.", 404);
+    if (!c || c.company_id !== req.companyId) return fail(res, "Container not found.", 404);
     if (req.user.role !== "SUPER_ADMIN" && !req.userWarehouseIds.includes(c.warehouse_id)) {
       return fail(res, "You do not have permission to access this warehouse.", 403);
     }
@@ -91,10 +96,17 @@ router.post(
     const { warehouse_id, party_id, container_number, date_of_unloading, initial_packets, rent_type, rent_rate, notes } =
       req.body;
 
+    if (!warehouse_id || !party_id) return fail(res, "Warehouse and party are required.", 400);
+    const warehouse = db.prepare("SELECT id, company_id FROM warehouses WHERE id = ?").get(warehouse_id);
+    if (!warehouse || warehouse.company_id !== req.companyId) {
+      return fail(res, "You do not have permission to access this warehouse.", 403);
+    }
     if (req.user.role !== "SUPER_ADMIN" && !req.userWarehouseIds.includes(warehouse_id)) {
       return fail(res, "You do not have permission to access this warehouse.", 403);
     }
-    if (!warehouse_id || !party_id) return fail(res, "Warehouse and party are required.", 400);
+    const party = db.prepare("SELECT id, company_id FROM parties WHERE id = ?").get(party_id);
+    if (!party || party.company_id !== req.companyId) return fail(res, "Party not found.", 404);
+
     if (!container_number?.trim()) return fail(res, "Container number cannot be empty.", 400);
     if (!date_of_unloading || isNaN(Date.parse(date_of_unloading))) return fail(res, "A valid unloading date is required.", 400);
     if (!Number.isFinite(+initial_packets) || +initial_packets <= 0)
@@ -109,10 +121,11 @@ router.post(
 
     const id = nanoid();
     db.prepare(
-      `INSERT INTO containers (id, warehouse_id, party_id, container_number, date_of_unloading, initial_packets, rent_type, rent_rate, notes, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO containers (id, company_id, warehouse_id, party_id, container_number, date_of_unloading, initial_packets, rent_type, rent_rate, notes, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       id,
+      req.companyId,
       warehouse_id,
       party_id,
       container_number.trim(),
@@ -139,11 +152,15 @@ router.put(
   "/:id",
   asyncHandler(async (req, res) => {
     const c = db.prepare("SELECT * FROM containers WHERE id = ?").get(req.params.id);
-    if (!c) return fail(res, "Container not found.", 404);
+    if (!c || c.company_id !== req.companyId) return fail(res, "Container not found.", 404);
     if (req.user.role !== "SUPER_ADMIN" && !req.userWarehouseIds.includes(c.warehouse_id)) {
       return fail(res, "You do not have permission to access this warehouse.", 403);
     }
     const { party_id, rent_type, rent_rate, notes } = req.body;
+    if (party_id) {
+      const party = db.prepare("SELECT id, company_id FROM parties WHERE id = ?").get(party_id);
+      if (!party || party.company_id !== req.companyId) return fail(res, "Party not found.", 404);
+    }
     db.prepare(
       `UPDATE containers SET party_id=?, rent_type=?, rent_rate=?, notes=?, updated_at=datetime('now') WHERE id=?`
     ).run(party_id ?? c.party_id, rent_type ?? c.rent_type, rent_rate ?? c.rent_rate, notes ?? c.notes, c.id);
@@ -156,7 +173,7 @@ router.post(
   "/:id/clear",
   asyncHandler(async (req, res) => {
     const c = db.prepare("SELECT * FROM containers WHERE id = ?").get(req.params.id);
-    if (!c) return fail(res, "Container not found.", 404);
+    if (!c || c.company_id !== req.companyId) return fail(res, "Container not found.", 404);
     if (req.user.role !== "SUPER_ADMIN" && !req.userWarehouseIds.includes(c.warehouse_id)) {
       return fail(res, "You do not have permission to access this warehouse.", 403);
     }
@@ -181,7 +198,7 @@ router.delete(
   "/:id",
   asyncHandler(async (req, res) => {
     const c = db.prepare("SELECT * FROM containers WHERE id = ?").get(req.params.id);
-    if (!c) return fail(res, "Container not found.", 404);
+    if (!c || c.company_id !== req.companyId) return fail(res, "Container not found.", 404);
     if (req.user.role !== "SUPER_ADMIN" && !req.userWarehouseIds.includes(c.warehouse_id)) {
       return fail(res, "You do not have permission to access this warehouse.", 403);
     }

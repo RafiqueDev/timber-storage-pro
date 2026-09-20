@@ -9,7 +9,8 @@ router.use(authenticate);
 
 /**
  * Resolves the warehouse_id filter for a report request.
- * { ids: null } means "no filter" (Super Admin, none specified).
+ * { ids: null } means "no filter" (Super Admin, none specified — still
+ * always combined with a mandatory company_id filter at each call site).
  * { ids: [...] } is the concrete list of warehouse ids to restrict to.
  * { forbidden: true } means a non-admin explicitly asked for a warehouse
  * they aren't assigned to — the caller must refuse the request outright,
@@ -17,6 +18,15 @@ router.use(authenticate);
  */
 function scopeWarehouses(req, warehouse_id) {
   if (warehouse_id) {
+    // Two independent checks, both required. First: does this warehouse
+    // even belong to the requester's company? This applies to EVERYONE
+    // including SUPER_ADMIN, whose authority is absolute only within their
+    // own company. Second: within that company, a non-admin must also be
+    // explicitly assigned to it.
+    const warehouse = db.prepare("SELECT id, company_id FROM warehouses WHERE id = ?").get(warehouse_id);
+    if (!warehouse || warehouse.company_id !== req.companyId) {
+      return { forbidden: true };
+    }
     if (req.user.role !== "SUPER_ADMIN" && !req.userWarehouseIds.includes(warehouse_id)) {
       return { forbidden: true };
     }
@@ -32,8 +42,8 @@ router.get(
     const scope = scopeWarehouses(req, req.query.warehouse_id);
     if (scope.forbidden) return fail(res, "You do not have permission to access this warehouse.", 403);
     let sql = `SELECT c.*, p.party_name, w.branch_name FROM containers c
-               JOIN parties p ON p.id=c.party_id JOIN warehouses w ON w.id=c.warehouse_id WHERE 1=1`;
-    const params = [];
+               JOIN parties p ON p.id=c.party_id JOIN warehouses w ON w.id=c.warehouse_id WHERE c.company_id = ?`;
+    const params = [req.companyId];
     if (scope.ids) {
       if (!scope.ids.length) return ok(res, []);
       sql += ` AND c.warehouse_id IN (${scope.ids.map(() => "?").join(",")})`;
@@ -72,8 +82,8 @@ router.get(
     if (scope.forbidden) return fail(res, "You do not have permission to access this warehouse.", 403);
     let sql = `SELECT l.*, c.container_number, p.party_name, w.branch_name FROM loading_logs l
                JOIN containers c ON c.id=l.container_id JOIN parties p ON p.id=l.party_id JOIN warehouses w ON w.id=l.warehouse_id
-               WHERE 1=1`;
-    const params = [];
+               WHERE l.company_id = ?`;
+    const params = [req.companyId];
     if (scope.ids) {
       if (!scope.ids.length) return ok(res, []);
       sql += ` AND l.warehouse_id IN (${scope.ids.map(() => "?").join(",")})`;
@@ -106,8 +116,8 @@ router.get(
     const scope = scopeWarehouses(req, req.query.warehouse_id);
     if (scope.forbidden) return fail(res, "You do not have permission to access this warehouse.", 403);
     let sql = `SELECT c.*, p.party_name, w.branch_name FROM containers c
-               JOIN parties p ON p.id=c.party_id JOIN warehouses w ON w.id=c.warehouse_id WHERE 1=1`;
-    const params = [];
+               JOIN parties p ON p.id=c.party_id JOIN warehouses w ON w.id=c.warehouse_id WHERE c.company_id = ?`;
+    const params = [req.companyId];
     if (scope.ids) {
       if (!scope.ids.length) return ok(res, []);
       sql += ` AND c.warehouse_id IN (${scope.ids.map(() => "?").join(",")})`;
@@ -149,8 +159,12 @@ router.get(
   asyncHandler(async (req, res) => {
     const warehouses =
       req.user.role === "SUPER_ADMIN"
-        ? db.prepare("SELECT * FROM warehouses").all()
-        : db.prepare(`SELECT * FROM warehouses WHERE id IN (${req.userWarehouseIds.map(() => "?").join(",") || "''"})`).all(...req.userWarehouseIds);
+        ? db.prepare("SELECT * FROM warehouses WHERE company_id = ?").all(req.companyId)
+        : db
+            .prepare(
+              `SELECT * FROM warehouses WHERE company_id = ? AND id IN (${req.userWarehouseIds.map(() => "?").join(",") || "''"})`
+            )
+            .all(req.companyId, ...req.userWarehouseIds);
 
     ok(
       res,

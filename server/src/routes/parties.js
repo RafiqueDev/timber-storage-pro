@@ -2,7 +2,7 @@ import { Router } from "express";
 import { nanoid } from "nanoid";
 import db from "../db.js";
 import { ok, fail, asyncHandler } from "../utils/response.js";
-import { authenticate } from "../middleware/auth.js";
+import { authenticate, canAccessWarehouse } from "../middleware/auth.js";
 import { logAudit } from "../services/audit.js";
 import { calculateContainerRent, defaultBillableDays } from "../services/billing.js";
 
@@ -13,6 +13,9 @@ router.get(
   "/",
   asyncHandler(async (req, res) => {
     const { search, status, warehouse_id } = req.query;
+    if (warehouse_id && !canAccessWarehouse(req, warehouse_id)) {
+      return fail(res, "You do not have permission to access this warehouse.", 403);
+    }
     // Single aggregate query instead of N+1 per-party lookups, so the list
     // page can show each party's container counts side-by-side without a
     // separate round trip per card.
@@ -23,10 +26,11 @@ router.get(
         SUM(CASE WHEN c.status = 'Cleared' THEN 1 ELSE 0 END) AS clearedContainers
       FROM parties p
       LEFT JOIN containers c ON c.party_id = p.id ${warehouse_id ? "AND c.warehouse_id = ?" : ""}
-      WHERE 1=1
+      WHERE p.company_id = ?
     `;
     const params = [];
     if (warehouse_id) params.push(warehouse_id);
+    params.push(req.companyId);
     if (search) {
       sql += " AND p.party_name LIKE ?";
       params.push(`%${search}%`);
@@ -53,7 +57,7 @@ router.get(
   "/:id",
   asyncHandler(async (req, res) => {
     const party = db.prepare("SELECT * FROM parties WHERE id = ?").get(req.params.id);
-    if (!party) return fail(res, "Party not found.", 404);
+    if (!party || party.company_id !== req.companyId) return fail(res, "Party not found.", 404);
 
     const containers = db.prepare("SELECT * FROM containers WHERE party_id = ?").all(party.id);
     const today = new Date().toISOString().slice(0, 10);
@@ -92,8 +96,11 @@ router.get(
   "/:id/statement",
   asyncHandler(async (req, res) => {
     const party = db.prepare("SELECT * FROM parties WHERE id = ?").get(req.params.id);
-    if (!party) return fail(res, "Party not found.", 404);
+    if (!party || party.company_id !== req.companyId) return fail(res, "Party not found.", 404);
     const { warehouse_id, start, end } = req.query;
+    if (warehouse_id && !canAccessWarehouse(req, warehouse_id)) {
+      return fail(res, "You do not have permission to access this warehouse.", 403);
+    }
 
     let invSql = "SELECT * FROM invoices WHERE party_id = ?";
     const invParams = [party.id];
@@ -137,9 +144,9 @@ router.post(
     if (!party_name?.trim()) return fail(res, "Party name is required.", 400);
     const id = nanoid();
     db.prepare(
-      `INSERT INTO parties (id, party_name, contact_person, phone, alternate_phone, address, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run(id, party_name.trim(), contact_person || "", phone || "", alternate_phone || "", address || "", notes || "");
+      `INSERT INTO parties (id, company_id, party_name, contact_person, phone, alternate_phone, address, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(id, req.companyId, party_name.trim(), contact_person || "", phone || "", alternate_phone || "", address || "", notes || "");
     logAudit({ user: req.user, action: "Created party", entity: "party", entityId: id, details: { party_name } });
     ok(res, db.prepare("SELECT * FROM parties WHERE id=?").get(id), 201);
   })
@@ -149,7 +156,7 @@ router.put(
   "/:id",
   asyncHandler(async (req, res) => {
     const p = db.prepare("SELECT * FROM parties WHERE id = ?").get(req.params.id);
-    if (!p) return fail(res, "Party not found.", 404);
+    if (!p || p.company_id !== req.companyId) return fail(res, "Party not found.", 404);
     const { party_name, contact_person, phone, alternate_phone, address, notes, status } = req.body;
     db.prepare(
       `UPDATE parties SET party_name=?, contact_person=?, phone=?, alternate_phone=?, address=?, notes=?, status=?, updated_at=datetime('now') WHERE id=?`
@@ -177,7 +184,7 @@ router.delete(
   "/:id",
   asyncHandler(async (req, res) => {
     const p = db.prepare("SELECT * FROM parties WHERE id = ?").get(req.params.id);
-    if (!p) return fail(res, "Party not found.", 404);
+    if (!p || p.company_id !== req.companyId) return fail(res, "Party not found.", 404);
     const containerCount = db.prepare("SELECT COUNT(*) c FROM containers WHERE party_id = ?").get(p.id).c;
     if (containerCount > 0) {
       return fail(res, "This party already has containers assigned, so it can no longer be undone.", 400);

@@ -8,19 +8,21 @@ import db from "../db.js";
  * gets notified for a given warehouse) stays consistent everywhere.
  */
 
-/** All Super Admins + any user assigned to warehouseId. */
+/** All Super Admins in the same company as warehouseId + any user assigned to warehouseId. */
 function recipientsFor(warehouseId) {
-  const admins = db.prepare("SELECT id FROM users WHERE role='SUPER_ADMIN' AND status='Active'").all();
-  let assigned = [];
-  if (warehouseId) {
-    assigned = db
-      .prepare(
-        `SELECT u.id FROM users u
-         JOIN user_warehouses uw ON uw.user_id = u.id
-         WHERE uw.warehouse_id = ? AND u.status='Active' AND u.role != 'SUPER_ADMIN'`
-      )
-      .all(warehouseId);
-  }
+  if (!warehouseId) return [];
+  const warehouse = db.prepare("SELECT company_id FROM warehouses WHERE id = ?").get(warehouseId);
+  if (!warehouse) return [];
+  const admins = db
+    .prepare("SELECT id FROM users WHERE role='SUPER_ADMIN' AND status='Active' AND company_id = ?")
+    .all(warehouse.company_id);
+  const assigned = db
+    .prepare(
+      `SELECT u.id FROM users u
+       JOIN user_warehouses uw ON uw.user_id = u.id
+       WHERE uw.warehouse_id = ? AND u.status='Active' AND u.role != 'SUPER_ADMIN'`
+    )
+    .all(warehouseId);
   const ids = new Set([...admins.map((a) => a.id), ...assigned.map((a) => a.id)]);
   return [...ids];
 }

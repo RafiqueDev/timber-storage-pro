@@ -13,8 +13,8 @@ router.get(
     if (warehouse_id && req.user.role !== "SUPER_ADMIN" && !req.userWarehouseIds.includes(warehouse_id)) {
       return fail(res, "You do not have permission to access this warehouse.", 403);
     }
-    let sql = "SELECT * FROM audit_logs WHERE 1=1";
-    const params = [];
+    let sql = "SELECT * FROM audit_logs WHERE company_id = ?";
+    const params = [req.companyId];
     if (warehouse_id) {
       sql += " AND warehouse_id = ?";
       params.push(warehouse_id);

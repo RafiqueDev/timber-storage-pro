@@ -14,10 +14,18 @@ function sanitize(u) {
   return rest;
 }
 
+/** Every warehouse id passed in must actually belong to the acting admin's own company. */
+function warehouseIdsBelongToCompany(companyId, ids) {
+  if (!ids.length) return true;
+  const placeholders = ids.map(() => "?").join(",");
+  const count = db.prepare(`SELECT COUNT(*) c FROM warehouses WHERE company_id = ? AND id IN (${placeholders})`).get(companyId, ...ids).c;
+  return count === ids.length;
+}
+
 router.get(
   "/",
   asyncHandler(async (req, res) => {
-    const users = db.prepare("SELECT * FROM users ORDER BY name").all();
+    const users = db.prepare("SELECT * FROM users WHERE company_id = ? ORDER BY name").all(req.companyId);
     ok(
       res,
       users.map((u) => {
@@ -36,14 +44,20 @@ router.post(
     const { name, username, email, password, role, warehouse_ids = [] } = req.body;
     if (!name?.trim() || !username?.trim() || !password) return fail(res, "Name, username and password are required.", 400);
     if (!["SUPER_ADMIN", "BRANCH_MANAGER", "STAFF"].includes(role)) return fail(res, "Invalid role.", 400);
+    if (!warehouseIdsBelongToCompany(req.companyId, warehouse_ids)) {
+      return fail(res, "One or more selected warehouses are invalid.", 400);
+    }
+    // Usernames are unique across the whole platform, matching the Setup
+    // sign-up flow — see routes/setup.js for why.
     const existing = db.prepare("SELECT id FROM users WHERE username = ?").get(username.trim());
     if (existing) return fail(res, "Username is already taken.", 409);
 
     const id = nanoid();
     const hash = bcrypt.hashSync(password, 10);
     const txn = db.transaction(() => {
-      db.prepare("INSERT INTO users (id, name, username, email, password_hash, role) VALUES (?, ?, ?, ?, ?, ?)").run(
+      db.prepare("INSERT INTO users (id, company_id, name, username, email, password_hash, role) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
         id,
+        req.companyId,
         name.trim(),
         username.trim(),
         email || "",
@@ -64,8 +78,11 @@ router.put(
   "/:id",
   asyncHandler(async (req, res) => {
     const u = db.prepare("SELECT * FROM users WHERE id = ?").get(req.params.id);
-    if (!u) return fail(res, "User not found.", 404);
+    if (!u || u.company_id !== req.companyId) return fail(res, "User not found.", 404);
     const { name, email, role, status, warehouse_ids } = req.body;
+    if (Array.isArray(warehouse_ids) && !warehouseIdsBelongToCompany(req.companyId, warehouse_ids)) {
+      return fail(res, "One or more selected warehouses are invalid.", 400);
+    }
     const txn = db.transaction(() => {
       db.prepare("UPDATE users SET name=?, email=?, role=?, status=?, updated_at=datetime('now') WHERE id=?").run(
         name ?? u.name,
@@ -90,11 +107,13 @@ router.put(
 router.post(
   "/:id/reset-password",
   asyncHandler(async (req, res) => {
+    const target = db.prepare("SELECT * FROM users WHERE id = ?").get(req.params.id);
+    if (!target || target.company_id !== req.companyId) return fail(res, "User not found.", 404);
     const { password } = req.body;
     if (!password || password.length < 6) return fail(res, "New password must be at least 6 characters.", 400);
     const hash = bcrypt.hashSync(password, 10);
-    db.prepare("UPDATE users SET password_hash=?, updated_at=datetime('now') WHERE id=?").run(hash, req.params.id);
-    logAudit({ user: req.user, action: "Reset user password", entity: "user", entityId: req.params.id });
+    db.prepare("UPDATE users SET password_hash=?, updated_at=datetime('now') WHERE id=?").run(hash, target.id);
+    logAudit({ user: req.user, action: "Reset user password", entity: "user", entityId: target.id });
     ok(res, { reset: true });
   })
 );

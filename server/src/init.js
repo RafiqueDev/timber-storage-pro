@@ -4,13 +4,15 @@ import { nanoid } from "nanoid";
 import db from "./db.js";
 
 /**
- * Sets up a completely clean system: your company name + exactly one
- * Super Admin account. No demo warehouses, parties, containers, or
- * invoices — unlike seed.js, which is for trying the app out with sample
- * data. Run this once when you're ready to start using the app for real.
+ * CLI equivalent of the in-browser Setup screen: creates a brand new
+ * company + exactly one Super Admin account for it. No demo warehouses,
+ * parties, containers, or invoices — unlike seed.js, which is for trying
+ * the app out with sample data.
  *
- * Safe to re-run: it wipes ALL existing data first (with a confirmation
- * prompt), so use `npm run seed` instead if you just want the demo data back.
+ * This is multi-tenant: running it does NOT wipe or touch any existing
+ * company's data. It only ever adds a new, completely isolated company —
+ * the same as clicking "Create Account" on the login screen. Run it as many
+ * times as you have real companies to onboard.
  *
  * Uses a plain synchronous stdin reader rather than the readline module —
  * deliberately, so prompts are answered strictly one at a time with no risk
@@ -45,22 +47,33 @@ function ask(promptText, { required = true } = {}) {
 }
 
 function main() {
-  console.log("\nTimber Storage Pro — First-Time Setup\n" + "-".repeat(40));
-  console.log("This creates your real company + your own admin login.");
-  console.log("It will erase any existing demo/seed data first.\n");
+  console.log("\nTimber Storage Pro — Create a New Company Account\n" + "-".repeat(40));
+  console.log("This adds a brand new, fully isolated company + its own admin login.");
+  console.log("It does NOT touch any other company already in this database.\n");
 
-  const confirm = ask("Type YES to continue and wipe existing data: ");
-  if (confirm !== "YES") {
-    console.log("Cancelled. No changes were made.");
-    process.exit(0);
-  }
-
-  const companyName = ask("\nCompany / business name: ");
+  const companyName = ask("Company / business name: ");
   const currencySymbol = ask("Currency symbol (default: Rs.): ", { required: false }) || "Rs.";
 
-  console.log("\nNow create your own Super Admin login:");
+  console.log("\nNow create the admin login for this company:");
   const adminName = ask("Your full name: ");
-  const username = ask("Choose a username: ");
+  let username;
+  while (true) {
+    username = ask("Choose a username: ");
+    if (username.length < 3) {
+      console.log("  Username must be at least 3 characters.");
+      continue;
+    }
+    if (!/^[a-zA-Z0-9_.-]+$/.test(username)) {
+      console.log("  Username can only contain letters, numbers, dots, hyphens, and underscores.");
+      continue;
+    }
+    const existing = db.prepare("SELECT id FROM users WHERE username = ?").get(username);
+    if (existing) {
+      console.log("  That username is already taken (usernames are unique across every company on this install). Try another.");
+      continue;
+    }
+    break;
+  }
   let password;
   while (true) {
     password = ask("Choose a password (min 6 characters): ");
@@ -68,28 +81,18 @@ function main() {
     console.log("  Password must be at least 6 characters.");
   }
 
-  const txn = db.transaction(() => {
-    db.prepare("DELETE FROM notifications").run();
-    db.prepare("DELETE FROM audit_logs").run();
-    db.prepare("DELETE FROM payments").run();
-    db.prepare("DELETE FROM invoice_items").run();
-    db.prepare("DELETE FROM invoices").run();
-    db.prepare("DELETE FROM loading_logs").run();
-    db.prepare("DELETE FROM containers").run();
-    db.prepare("DELETE FROM parties").run();
-    db.prepare("DELETE FROM user_warehouses").run();
-    db.prepare("DELETE FROM users").run();
-    db.prepare("DELETE FROM warehouses").run();
-    db.prepare("DELETE FROM companies").run();
+  const companyId = nanoid();
+  const adminId = nanoid();
 
+  const txn = db.transaction(() => {
     db.prepare(
       `INSERT INTO companies (id, name, currency, currency_symbol, invoice_prefix, date_format, timezone, low_stock_threshold, next_invoice_seq, developer_name)
-       VALUES ('default', ?, 'PKR', ?, 'INV', 'DD-MM-YYYY', 'Asia/Karachi', 25, 1, ?)`
-    ).run(companyName, currencySymbol, companyName);
+       VALUES (?, ?, 'PKR', ?, 'INV', 'DD-MM-YYYY', 'Asia/Karachi', 25, 1, ?)`
+    ).run(companyId, companyName, currencySymbol, companyName);
 
-    const adminId = nanoid();
-    db.prepare("INSERT INTO users (id, name, username, email, password_hash, role) VALUES (?, ?, ?, '', ?, 'SUPER_ADMIN')").run(
+    db.prepare("INSERT INTO users (id, company_id, name, username, email, password_hash, role) VALUES (?, ?, ?, ?, '', ?, 'SUPER_ADMIN')").run(
       adminId,
+      companyId,
       adminName,
       username,
       bcrypt.hashSync(password, 10)
@@ -101,7 +104,7 @@ function main() {
   txn();
 
   console.log("\n" + "=".repeat(40));
-  console.log("Setup complete. Your system is now empty and ready to use.");
+  console.log(`Company "${companyName}" created.`);
   console.log(`Log in with:  ${username} / (the password you just set)`);
   console.log("\nNext steps inside the app:");
   console.log("  1. Log in, go to Admin > Warehouses, and add your first branch.");

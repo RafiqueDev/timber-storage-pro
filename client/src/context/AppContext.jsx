@@ -14,7 +14,6 @@ export function AppProvider({ children }) {
   const [notifications, setNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [breadcrumbExtra, setBreadcrumbExtra] = useState(null);
-  const [systemInitialized, setSystemInitialized] = useState(null); // null = still checking
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -41,15 +40,6 @@ export function AppProvider({ children }) {
     } catch {
       /* ignore transient failures */
     }
-  }, []);
-
-  useEffect(() => {
-    // Checked once on load, independent of auth, so the router knows
-    // whether to force the one-time Setup screen instead of Login.
-    api
-      .setupStatus()
-      .then((d) => setSystemInitialized(d.initialized))
-      .catch(() => setSystemInitialized(true)); // fail-safe: never accidentally show Setup due to a network hiccup
   }, []);
 
   const bootstrap = useCallback(async () => {
@@ -99,8 +89,10 @@ export function AppProvider({ children }) {
     return data.user;
   };
 
-  /** One-time first-run flow: creates the company + admin account and logs
-   * straight in, same shape of side effects as login() above. */
+  /** Multi-tenant sign-up: creates a brand new company + admin account and
+   * logs straight in, same shape of side effects as login() above. Can be
+   * called at any time — unlike the old single-tenant version, this is
+   * never gated behind "has anyone signed up yet". */
   const completeSetup = async (payload) => {
     const data = await api.completeSetup(payload);
     localStorage.setItem("tsp_access_token", data.accessToken);
@@ -108,7 +100,6 @@ export function AppProvider({ children }) {
     setUser(data.user);
     setWarehouses(data.warehouses);
     setActiveWarehouseId("all");
-    setSystemInitialized(true);
     loadCompany();
     loadNotifications();
     return data.user;
@@ -173,7 +164,6 @@ export function AppProvider({ children }) {
         authLoading,
         login,
         completeSetup,
-        systemInitialized,
         logout,
         theme,
         setTheme,

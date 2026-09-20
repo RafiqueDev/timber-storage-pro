@@ -10,7 +10,7 @@ router.use(authenticate);
 router.get(
   "/",
   asyncHandler(async (req, res) => {
-    ok(res, db.prepare("SELECT * FROM companies WHERE id='default'").get());
+    ok(res, db.prepare("SELECT * FROM companies WHERE id = ?").get(req.companyId));
   })
 );
 
@@ -18,10 +18,10 @@ router.put(
   "/",
   authorizeRole("SUPER_ADMIN"),
   asyncHandler(async (req, res) => {
-    const c = db.prepare("SELECT * FROM companies WHERE id='default'").get();
+    const c = db.prepare("SELECT * FROM companies WHERE id = ?").get(req.companyId);
     const { name, currency, currency_symbol, invoice_prefix, date_format, timezone, low_stock_threshold, logo, developer_name } = req.body;
     db.prepare(
-      `UPDATE companies SET name=?, currency=?, currency_symbol=?, invoice_prefix=?, date_format=?, timezone=?, low_stock_threshold=?, logo=?, developer_name=?, updated_at=datetime('now') WHERE id='default'`
+      `UPDATE companies SET name=?, currency=?, currency_symbol=?, invoice_prefix=?, date_format=?, timezone=?, low_stock_threshold=?, logo=?, developer_name=?, updated_at=datetime('now') WHERE id=?`
     ).run(
       name ?? c.name,
       currency ?? c.currency,
@@ -32,9 +32,10 @@ router.put(
       low_stock_threshold ?? c.low_stock_threshold,
       logo ?? c.logo,
       developer_name ?? c.developer_name,
+      req.companyId
     );
     logAudit({ user: req.user, action: "Updated system settings" });
-    ok(res, db.prepare("SELECT * FROM companies WHERE id='default'").get());
+    ok(res, db.prepare("SELECT * FROM companies WHERE id = ?").get(req.companyId));
   })
 );
 

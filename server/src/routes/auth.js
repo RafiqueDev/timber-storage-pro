@@ -33,13 +33,16 @@ router.post(
     const validPassword = bcrypt.compareSync(password, user.password_hash);
     if (!validPassword) return fail(res, "Invalid username or password.", 401);
 
-    const warehouses = db
-      .prepare(
-        `SELECT w.* FROM warehouses w
-         JOIN user_warehouses uw ON uw.warehouse_id = w.id
-         WHERE uw.user_id = ?`
-      )
-      .all(user.id);
+    const warehouses =
+      user.role === "SUPER_ADMIN"
+        ? db.prepare("SELECT * FROM warehouses WHERE company_id = ?").all(user.company_id)
+        : db
+            .prepare(
+              `SELECT w.* FROM warehouses w
+               JOIN user_warehouses uw ON uw.warehouse_id = w.id
+               WHERE uw.user_id = ?`
+            )
+            .all(user.id);
 
     const tokens = issueTokens(user);
     logAudit({ user, action: "Login" });
@@ -79,7 +82,7 @@ router.get(
   asyncHandler(async (req, res) => {
     const warehouses =
       req.user.role === "SUPER_ADMIN"
-        ? db.prepare("SELECT * FROM warehouses").all()
+        ? db.prepare("SELECT * FROM warehouses WHERE company_id = ?").all(req.companyId)
         : db
             .prepare(
               `SELECT w.* FROM warehouses w

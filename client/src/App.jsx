@@ -38,37 +38,16 @@ function ProtectedRoute({ children }) {
   return children;
 }
 
-function FullScreenLoader() {
-  return (
-    <div className="flex h-screen items-center justify-center bg-stone-50 dark:bg-stone-950">
-      <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary-600 border-t-transparent" />
-    </div>
-  );
-}
-
 export default function App() {
-  const { user, systemInitialized } = useApp();
-
-  // Still checking whether this install has ever been set up — avoid a
-  // flash of the wrong screen (Login vs Setup) while that's in flight.
-  if (systemInitialized === null) return <FullScreenLoader />;
-
-  // No Super Admin exists yet: the ENTIRE app is locked to the one-time
-  // Setup screen until that's done. This is the only public "sign-up" this
-  // app ever allows, and only while the system is genuinely empty.
-  if (systemInitialized === false) {
-    return (
-      <Routes>
-        <Route path="/setup" element={<Setup />} />
-        <Route path="*" element={<Navigate to="/setup" replace />} />
-      </Routes>
-    );
-  }
+  const { user } = useApp();
 
   return (
     <Routes>
-      {/* Setup is permanently unreachable once the system has been initialized. */}
-      <Route path="/setup" element={<Navigate to="/login" replace />} />
+      {/* Multi-tenant: Setup is a normal, always-reachable public page —
+          anyone can create a brand new, fully isolated company + admin
+          account here at any time, the same way Login is always reachable.
+          It is never gated behind "has anyone signed up yet". */}
+      <Route path="/setup" element={<Setup />} />
       <Route path="/login" element={user ? <Navigate to="/dashboard" replace /> : <Login />} />
 
       {/* Party Portal: a completely separate, party-facing auth path — never

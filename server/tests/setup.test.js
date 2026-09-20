@@ -15,9 +15,8 @@ function cleanupDbFiles() {
 }
 cleanupDbFiles();
 
-// This test file needs its OWN database (separate from api.test.js's),
-// since the whole point is to verify behavior starting from zero users —
-// api.test.js's shared instance already has users seeded into it.
+// This test file needs its OWN database (separate from api.test.js's), to
+// verify behavior starting from a genuinely empty install.
 process.env.DB_FILE = testDbPath;
 process.env.JWT_ACCESS_SECRET = "setup_test_access_secret";
 process.env.JWT_REFRESH_SECRET = "setup_test_refresh_secret";
@@ -38,16 +37,16 @@ after(() => {
   cleanupDbFiles();
 });
 
-async function post(url, body) {
+async function post(url, body, token) {
   const res = await fetch(baseUrl + url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     body: JSON.stringify(body),
   });
   return { status: res.status, data: await res.json() };
 }
-async function get(url) {
-  const res = await fetch(baseUrl + url);
+async function get(url, token) {
+  const res = await fetch(baseUrl + url, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
   return { status: res.status, data: await res.json() };
 }
 
@@ -73,13 +72,9 @@ test("setup rejects invalid input before touching the database", async () => {
 
   const badEmail = await post("/setup", { companyName: "Acme", adminName: "A", username: "admin", password: "secret1", email: "not-an-email" });
   assert.equal(badEmail.status, 400);
-
-  // None of these bad attempts should have flipped initialization state.
-  const status = await get("/setup/status");
-  assert.equal(status.data.data.initialized, false);
 });
 
-test("setup creates the company + admin and logs straight in", async () => {
+test("setup creates a company + admin and logs straight in", async () => {
   const res = await post("/setup", {
     companyName: "Acme Timber Co",
     currencySymbol: "$",
@@ -96,18 +91,32 @@ test("setup creates the company + admin and logs straight in", async () => {
   assert.deepEqual(res.data.data.warehouses, []);
 });
 
-test("the system now reports itself as initialized, and setup is permanently refused", async () => {
+test("the system now reports itself as initialized — but setup remains open for the NEXT company", async () => {
   const status = await get("/setup/status");
   assert.equal(status.data.data.initialized, true);
 
-  const secondAttempt = await post("/setup", {
-    companyName: "Some Other Co",
-    adminName: "Intruder",
-    username: "hacker",
-    password: "whatever1",
+  // Multi-tenant: unlike the old single-tenant lock, a second company can
+  // sign up at any time — this is the core of "add new accounts in future,
+  // used by everyone with separate accounts".
+  const second = await post("/setup", {
+    companyName: "Second Company Ltd",
+    adminName: "Second Admin",
+    username: "seconduser",
+    password: "secondpass1",
   });
-  assert.equal(secondAttempt.status, 403);
-  assert.match(secondAttempt.data.message, /already been set up/i);
+  assert.equal(second.status, 201);
+  assert.notEqual(second.data.data.user.id, undefined);
+});
+
+test("setup refuses a duplicate username even across different companies", async () => {
+  const dup = await post("/setup", {
+    companyName: "Yet Another Co",
+    adminName: "Someone Else",
+    username: "jane",
+    password: "whateverpass",
+  });
+  assert.equal(dup.status, 409);
+  assert.match(dup.data.message, /already taken/i);
 });
 
 test("the account created by setup can log in normally afterward", async () => {
@@ -116,10 +125,16 @@ test("the account created by setup can log in normally afterward", async () => {
   assert.equal(login.data.data.user.role, "SUPER_ADMIN");
 });
 
-test("no demo data was created — only the one admin account exists", async () => {
-  const login = await post("/auth/login", { username: "jane", password: "secretpass" });
-  const token = login.data.data.accessToken;
-  const res = await fetch(baseUrl + "/warehouses", { headers: { Authorization: `Bearer ${token}` } });
-  const data = await res.json();
-  assert.deepEqual(data.data, [], "a freshly set-up system must have zero warehouses");
+test("no demo data was created for either company, and their warehouses never overlap", async () => {
+  const janeLogin = await post("/auth/login", { username: "jane", password: "secretpass" });
+  const janeToken = janeLogin.data.data.accessToken;
+  const janeWarehouses = await get("/warehouses", janeToken);
+  assert.deepEqual(janeWarehouses.data.data, [], "a freshly set-up company must have zero warehouses");
+
+  const secondLogin = await post("/auth/login", { username: "seconduser", password: "secondpass1" });
+  const secondToken = secondLogin.data.data.accessToken;
+
+  await post("/warehouses", { branch_name: "Jane's Only Warehouse" }, janeToken);
+  const secondCompanyWarehouses = await get("/warehouses", secondToken);
+  assert.deepEqual(secondCompanyWarehouses.data.data, [], "one company's new warehouse must never appear for another company");
 });

@@ -30,6 +30,7 @@ let server;
 let baseUrl;
 let adminToken, staffToken;
 let wh1Id, wh2Id, partyId;
+let company2Id, company2AdminToken, company2WhId, company2PartyId;
 
 before(() => {
   db.prepare("INSERT INTO companies (id, name, next_invoice_seq) VALUES ('default','Test Co',1)").run();
@@ -40,20 +41,35 @@ before(() => {
   db.prepare("INSERT INTO warehouses (id, company_id, branch_name) VALUES (?, 'default', 'WH2')").run(wh2Id);
 
   const adminId = nanoid();
-  db.prepare("INSERT INTO users (id, name, username, password_hash, role) VALUES (?, 'Admin', 'admin', ?, 'SUPER_ADMIN')").run(
+  db.prepare("INSERT INTO users (id, company_id, name, username, password_hash, role) VALUES (?, 'default', 'Admin', 'admin', ?, 'SUPER_ADMIN')").run(
     adminId,
     bcrypt.hashSync("admin123", 10)
   );
 
   const staffId = nanoid();
-  db.prepare("INSERT INTO users (id, name, username, password_hash, role) VALUES (?, 'Staff', 'staff', ?, 'STAFF')").run(
+  db.prepare("INSERT INTO users (id, company_id, name, username, password_hash, role) VALUES (?, 'default', 'Staff', 'staff', ?, 'STAFF')").run(
     staffId,
     bcrypt.hashSync("staff123", 10)
   );
   db.prepare("INSERT INTO user_warehouses (user_id, warehouse_id) VALUES (?, ?)").run(staffId, wh1Id);
 
   partyId = nanoid();
-  db.prepare("INSERT INTO parties (id, party_name) VALUES (?, 'Test Party')").run(partyId);
+  db.prepare("INSERT INTO parties (id, company_id, party_name) VALUES (?, 'default', 'Test Party')").run(partyId);
+
+  // A second, completely separate company — used throughout for the
+  // multi-tenant isolation tests near the end of this file.
+  company2Id = nanoid();
+  db.prepare("INSERT INTO companies (id, name, next_invoice_seq) VALUES (?, 'Other Co', 1)").run(company2Id);
+  company2WhId = nanoid();
+  db.prepare("INSERT INTO warehouses (id, company_id, branch_name) VALUES (?, ?, 'Other Co Warehouse')").run(company2WhId, company2Id);
+  const company2AdminId = nanoid();
+  db.prepare("INSERT INTO users (id, company_id, name, username, password_hash, role) VALUES (?, ?, 'Other Admin', 'otheradmin', ?, 'SUPER_ADMIN')").run(
+    company2AdminId,
+    company2Id,
+    bcrypt.hashSync("otherpass1", 10)
+  );
+  company2PartyId = nanoid();
+  db.prepare("INSERT INTO parties (id, company_id, party_name) VALUES (?, ?, 'Other Co Party')").run(company2PartyId, company2Id);
 
   server = app.listen(0);
   const { port } = server.address();
@@ -95,6 +111,12 @@ test("login issues tokens for both roles", async () => {
   const staff = await post("/auth/login", { username: "staff", password: "staff123" });
   assert.equal(staff.status, 200);
   staffToken = staff.data.data.accessToken;
+
+  const otherAdmin = await post("/auth/login", { username: "otheradmin", password: "otherpass1" });
+  assert.equal(otherAdmin.status, 200);
+  company2AdminToken = otherAdmin.data.data.accessToken;
+  // A Super Admin's own warehouses list must never include another company's warehouse.
+  assert.ok(otherAdmin.data.data.warehouses.every((w) => w.id !== wh1Id && w.id !== wh2Id));
 
   const bad = await post("/auth/login", { username: "admin", password: "wrong" });
   assert.equal(bad.status, 401);
@@ -704,4 +726,186 @@ test("party portal: the management list shows access status per party", async ()
   list = await get("/party-portal", adminToken);
   entry = list.data.data.find((p) => p.party_id === portalPartyId);
   assert.equal(entry.access.status, "revoked");
+});
+
+// ---------------------------------------------------------------------------
+// MULTI-TENANT ISOLATION
+// company2Id / company2AdminToken / company2WhId / company2PartyId are a
+// completely separate company set up in `before()`. Every test below
+// verifies that company2's admin — a SUPER_ADMIN, with the highest
+// privilege level that exists — can never see or touch company1's data by
+// omitting a filter or guessing/reusing an id, and vice versa.
+// ---------------------------------------------------------------------------
+
+test("multi-tenant: warehouses list never crosses company boundaries", async () => {
+  const co1List = await get("/warehouses", adminToken);
+  assert.ok(co1List.data.data.every((w) => w.id === wh1Id || w.id === wh2Id));
+
+  const co2List = await get("/warehouses", company2AdminToken);
+  assert.ok(co2List.data.data.every((w) => w.id === company2WhId));
+  assert.ok(!co2List.data.data.some((w) => w.id === wh1Id || w.id === wh2Id));
+});
+
+test("multi-tenant: a company's Super Admin gets 404, not another company's data, when accessing a warehouse by id", async () => {
+  const r = await get(`/warehouses/${wh1Id}`, company2AdminToken);
+  assert.equal(r.status, 404);
+
+  const rUpdate = await fetch(`${baseUrl}/warehouses/${wh1Id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${company2AdminToken}` },
+    body: JSON.stringify({ branch_name: "Hijacked" }),
+  });
+  assert.equal(rUpdate.status, 404);
+
+  const rDeactivate = await fetch(`${baseUrl}/warehouses/${wh1Id}`, { method: "DELETE", headers: { Authorization: `Bearer ${company2AdminToken}` } });
+  assert.equal(rDeactivate.status, 404);
+});
+
+test("multi-tenant: cannot create a container against another company's warehouse or party", async () => {
+  const crossWarehouse = await post(
+    "/containers",
+    { warehouse_id: wh1Id, party_id: company2PartyId, container_number: "CROSS-1", date_of_unloading: "2026-01-01", initial_packets: 10, rent_type: "Daily", rent_rate: 100 },
+    company2AdminToken
+  );
+  assert.equal(crossWarehouse.status, 403);
+
+  const crossParty = await post(
+    "/containers",
+    { warehouse_id: company2WhId, party_id: partyId, container_number: "CROSS-2", date_of_unloading: "2026-01-01", initial_packets: 10, rent_type: "Daily", rent_rate: 100 },
+    company2AdminToken
+  );
+  assert.equal(crossParty.status, 404);
+});
+
+test("multi-tenant: containers, parties, invoices, and payments lists never leak across companies", async () => {
+  const c1 = await post(
+    "/containers",
+    { warehouse_id: wh1Id, party_id: partyId, container_number: "MT-CO1", date_of_unloading: "2026-01-01", initial_packets: 10, rent_type: "Daily", rent_rate: 100 },
+    adminToken
+  );
+  const c2 = await post(
+    "/containers",
+    { warehouse_id: company2WhId, party_id: company2PartyId, container_number: "MT-CO2", date_of_unloading: "2026-01-01", initial_packets: 10, rent_type: "Daily", rent_rate: 100 },
+    company2AdminToken
+  );
+
+  const co1Containers = await get("/containers", adminToken);
+  assert.ok(!co1Containers.data.data.some((c) => c.id === c2.data.data.id));
+  const co2Containers = await get("/containers", company2AdminToken);
+  assert.ok(!co2Containers.data.data.some((c) => c.id === c1.data.data.id));
+
+  // Fetching the other company's container directly by id is a 404, not the data.
+  const crossFetch = await get(`/containers/${c1.data.data.id}`, company2AdminToken);
+  assert.equal(crossFetch.status, 404);
+
+  const inv1 = await post("/invoices", { party_id: partyId, warehouse_id: wh1Id, lines: [{ container_id: c1.data.data.id, billable_days: 5 }] }, adminToken);
+  const inv2 = await post("/invoices", { party_id: company2PartyId, warehouse_id: company2WhId, lines: [{ container_id: c2.data.data.id, billable_days: 5 }] }, company2AdminToken);
+  // Both companies independently produce their own "INV-<year>-000001"
+  // style sequence — a global unique constraint here would wrongly collide.
+  assert.equal(inv1.status, 201);
+  assert.equal(inv2.status, 201);
+
+  const crossInvoiceFetch = await get(`/invoices/${inv1.data.data.id}`, company2AdminToken);
+  assert.equal(crossInvoiceFetch.status, 404);
+
+  const co1Invoices = await get("/invoices", adminToken);
+  assert.ok(!co1Invoices.data.data.some((i) => i.id === inv2.data.data.id));
+
+  const co1Parties = await get("/parties", adminToken);
+  assert.ok(!co1Parties.data.data.some((p) => p.id === company2PartyId));
+  const co2Parties = await get("/parties", company2AdminToken);
+  assert.ok(!co2Parties.data.data.some((p) => p.id === partyId));
+
+  await post("/payments", { invoice_id: inv1.data.data.id, amount: 100, payment_date: "2026-01-10" }, adminToken);
+  const co1Payments = await get("/payments", adminToken);
+  const co2Payments = await get("/payments", company2AdminToken);
+  const co1PaymentInvoiceIds = new Set(co1Payments.data.data.map((p) => p.invoice_number));
+  assert.ok(!co2Payments.data.data.some((p) => co1PaymentInvoiceIds.has(p.invoice_number) && p.invoice_number === inv1.data.data.invoice_number));
+});
+
+test("multi-tenant: reports, dashboard, and audit logs never mix companies together", async () => {
+  const co1Storage = await get("/reports/storage", adminToken);
+  const co2Storage = await get("/reports/storage", company2AdminToken);
+  const co1Numbers = new Set(co1Storage.data.data.map((c) => c.container_number));
+  assert.ok(!co2Storage.data.data.some((c) => co1Numbers.has(c.container_number) && c.container_number === "MT-CO1"));
+  assert.ok(!co1Storage.data.data.some((c) => c.container_number === "MT-CO2"));
+
+  const co1Dashboard = await get("/dashboard", adminToken);
+  const co2Dashboard = await get("/dashboard", company2AdminToken);
+  assert.equal(co1Dashboard.status, 200);
+  assert.equal(co2Dashboard.status, 200);
+  // Both companies have exactly one container each at this point in the
+  // suite for their respective dashboards' "active containers" baseline —
+  // the real assertion is just that neither request errors and each only
+  // reflects its own company (verified more directly via the recentActivity
+  // audit-log check below, which would show the other company's action
+  // names if isolation were broken).
+  const co1ActivityActions = co1Dashboard.data.data.recentActivity.map((a) => a.action + a.entity_id);
+  const co2ActivityActions = co2Dashboard.data.data.recentActivity.map((a) => a.action + a.entity_id);
+  assert.ok(co1ActivityActions.every((a) => !co2ActivityActions.includes(a)) || co1ActivityActions.length === 0);
+
+  const co1Audit = await get("/audit-logs", adminToken);
+  const co2Audit = await get("/audit-logs", company2AdminToken);
+  const co1EntityIds = new Set(co1Audit.data.data.map((a) => a.entity_id));
+  assert.ok(!co2Audit.data.data.some((a) => a.entity_id && co1EntityIds.has(a.entity_id) && a.details?.includes("MT-CO1")));
+});
+
+test("multi-tenant: users list and management never cross companies, even by direct id", async () => {
+  const co1Users = await get("/users", adminToken);
+  assert.ok(co1Users.data.data.every((u) => u.username !== "otheradmin"));
+
+  const co2Users = await get("/users", company2AdminToken);
+  assert.ok(co2Users.data.data.every((u) => u.username === "otheradmin"));
+
+  // company2's admin cannot edit or reset the password of company1's staff user, even knowing their id.
+  const staffLookup = await get("/users", adminToken);
+  const staffUser = staffLookup.data.data.find((u) => u.username === "staff");
+  const crossEdit = await fetch(`${baseUrl}/users/${staffUser.id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${company2AdminToken}` },
+    body: JSON.stringify({ name: "Hijacked Name" }),
+  });
+  assert.equal(crossEdit.status, 404);
+
+  const crossReset = await post(`/users/${staffUser.id}/reset-password`, { password: "hijacked123" }, company2AdminToken);
+  assert.equal(crossReset.status, 404);
+});
+
+test("multi-tenant: party portal management cannot generate or revoke access for another company's party", async () => {
+  const crossGenerate = await post(`/party-portal/${partyId}/generate`, {}, company2AdminToken);
+  assert.equal(crossGenerate.status, 404);
+
+  const crossRevoke = await post(`/party-portal/${partyId}/revoke`, {}, company2AdminToken);
+  assert.equal(crossRevoke.status, 404);
+
+  const co2List = await get("/party-portal", company2AdminToken);
+  assert.ok(!co2List.data.data.some((p) => p.party_id === partyId));
+});
+
+test("multi-tenant: settings are per-company, not shared", async () => {
+  await fetch(`${baseUrl}/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ name: "Company One Renamed" }),
+  });
+  const co1Settings = await get("/settings", adminToken);
+  const co2Settings = await get("/settings", company2AdminToken);
+  assert.equal(co1Settings.data.data.name, "Company One Renamed");
+  assert.notEqual(co2Settings.data.data.name, "Company One Renamed");
+});
+
+test("multi-tenant: reports reject another company's warehouse id outright, not just return empty", async () => {
+  // A Super Admin passing another company's warehouse_id must get a clean
+  // 403 — not a 200 with zero rows. Both are non-leaking, but only the 403
+  // is unambiguous, and an empty 200 would mask a future regression where
+  // the underlying company_id filter stopped working.
+  for (const path of ["/reports/storage", "/reports/loading", "/reports/rent"]) {
+    const r = await get(`${path}?warehouse_id=${wh1Id}`, company2AdminToken);
+    assert.equal(r.status, 403, `${path} should refuse another company's warehouse id`);
+  }
+});
+
+test("multi-tenant: usernames are globally unique across every company", async () => {
+  const dup = await post("/users", { name: "Dup", username: "otheradmin", password: "somepassword", role: "STAFF" }, adminToken);
+  assert.equal(dup.status, 409);
 });

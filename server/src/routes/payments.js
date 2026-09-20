@@ -14,8 +14,8 @@ router.get(
   "/",
   asyncHandler(async (req, res) => {
     const { invoice_id, party_id, warehouse_id } = req.query;
-    let sql = `SELECT pay.*, i.invoice_number FROM payments pay JOIN invoices i ON i.id = pay.invoice_id WHERE 1=1`;
-    const params = [];
+    let sql = `SELECT pay.*, i.invoice_number FROM payments pay JOIN invoices i ON i.id = pay.invoice_id WHERE pay.company_id = ?`;
+    const params = [req.companyId];
     if (warehouse_id) {
       if (req.user.role !== "SUPER_ADMIN" && !req.userWarehouseIds.includes(warehouse_id)) {
         return fail(res, "You do not have permission to access this warehouse.", 403);
@@ -23,8 +23,6 @@ router.get(
       sql += " AND pay.warehouse_id = ?";
       params.push(warehouse_id);
     } else if (req.user.role !== "SUPER_ADMIN") {
-      // No specific warehouse requested — never fall through to "all
-      // payments system-wide" for a non-admin; scope to what they can see.
       if (!req.userWarehouseIds.length) return ok(res, []);
       sql += ` AND pay.warehouse_id IN (${req.userWarehouseIds.map(() => "?").join(",")})`;
       params.push(...req.userWarehouseIds);
@@ -47,7 +45,7 @@ router.post(
   asyncHandler(async (req, res) => {
     const { invoice_id, amount, payment_date, payment_method, reference, notes } = req.body;
     const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(invoice_id);
-    if (!invoice) return fail(res, "Invoice not found.", 400);
+    if (!invoice || invoice.company_id !== req.companyId) return fail(res, "Invoice not found.", 400);
     if (req.user.role !== "SUPER_ADMIN" && !req.userWarehouseIds.includes(invoice.warehouse_id)) {
       return fail(res, "You do not have permission to access this warehouse.", 403);
     }
@@ -60,9 +58,21 @@ router.post(
     const id = nanoid();
     const txn = db.transaction(() => {
       db.prepare(
-        `INSERT INTO payments (id, invoice_id, party_id, warehouse_id, amount, payment_date, payment_method, reference, notes, received_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(id, invoice_id, invoice.party_id, invoice.warehouse_id, amt, payment_date || new Date().toISOString().slice(0, 10), payment_method || "Cash", reference || "", notes || "", req.user.id);
+        `INSERT INTO payments (id, company_id, invoice_id, party_id, warehouse_id, amount, payment_date, payment_method, reference, notes, received_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        id,
+        req.companyId,
+        invoice_id,
+        invoice.party_id,
+        invoice.warehouse_id,
+        amt,
+        payment_date || new Date().toISOString().slice(0, 10),
+        payment_method || "Cash",
+        reference || "",
+        notes || "",
+        req.user.id
+      );
 
       const newPaid = round2(invoice.paid_amount + amt);
       const newBalance = round2(invoice.subtotal - newPaid);
@@ -106,7 +116,7 @@ router.delete(
   "/:id",
   asyncHandler(async (req, res) => {
     const payment = db.prepare("SELECT * FROM payments WHERE id = ?").get(req.params.id);
-    if (!payment) return fail(res, "Payment not found.", 404);
+    if (!payment || payment.company_id !== req.companyId) return fail(res, "Payment not found.", 404);
     const invoice = db.prepare("SELECT * FROM invoices WHERE id = ?").get(payment.invoice_id);
     if (!invoice) return fail(res, "Invoice not found.", 404);
     if (req.user.role !== "SUPER_ADMIN" && !req.userWarehouseIds.includes(payment.warehouse_id)) {

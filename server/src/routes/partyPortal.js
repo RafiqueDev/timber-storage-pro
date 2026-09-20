@@ -24,15 +24,16 @@ function slugify(name) {
 
 // ---------------------------------------------------------------------------
 // ADMIN-FACING: manage portal access grants. Restricted to Super Admin and
-// Branch Manager — the same people who'd be the ones sending a party their
-// portal link in the first place.
+// Branch Manager. Every route here is scoped to the requester's own
+// company_id: an admin can only ever generate, revoke, or list portal
+// access for parties that belong to their own company.
 // ---------------------------------------------------------------------------
 router.get(
   "/",
   authenticate,
   authorizeRole("SUPER_ADMIN", "BRANCH_MANAGER"),
   asyncHandler(async (req, res) => {
-    const parties = db.prepare("SELECT * FROM parties ORDER BY party_name").all();
+    const parties = db.prepare("SELECT * FROM parties WHERE company_id = ? ORDER BY party_name").all(req.companyId);
     const rows = parties.map((p) => {
       const access = db
         .prepare("SELECT * FROM party_portal_access WHERE party_id = ? ORDER BY created_at DESC LIMIT 1")
@@ -47,13 +48,7 @@ router.get(
         party_name: p.party_name,
         phone: p.phone,
         access: access
-          ? {
-              id: access.id,
-              username: access.username,
-              expires_at: access.expires_at,
-              last_accessed_at: access.last_accessed_at,
-              status: accessStatus,
-            }
+          ? { id: access.id, username: access.username, expires_at: access.expires_at, last_accessed_at: access.last_accessed_at, status: accessStatus }
           : null,
       };
     });
@@ -67,10 +62,8 @@ router.post(
   authorizeRole("SUPER_ADMIN", "BRANCH_MANAGER"),
   asyncHandler(async (req, res) => {
     const party = db.prepare("SELECT * FROM parties WHERE id = ?").get(req.params.partyId);
-    if (!party) return fail(res, "Party not found.", 404);
+    if (!party || party.company_id !== req.companyId) return fail(res, "Party not found.", 404);
 
-    // Only the most recent grant per party is ever valid — revoke any prior
-    // one so there's never more than one live credential set floating around.
     db.prepare("UPDATE party_portal_access SET revoked = 1 WHERE party_id = ? AND revoked = 0").run(party.id);
 
     const username = `${slugify(party.party_name)}${genUsernameSuffix()}`;
@@ -80,9 +73,9 @@ router.post(
     const id = nanoid();
 
     db.prepare(
-      `INSERT INTO party_portal_access (id, party_id, username, password_hash, token, expires_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run(id, party.id, username, bcrypt.hashSync(password, 10), token, expiresAt, req.user.id);
+      `INSERT INTO party_portal_access (id, company_id, party_id, username, password_hash, token, expires_at, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(id, req.companyId, party.id, username, bcrypt.hashSync(password, 10), token, expiresAt, req.user.id);
 
     logAudit({ user: req.user, action: "Generated party portal access", entity: "party", entityId: party.id, details: { party_name: party.party_name, username } });
 
@@ -101,7 +94,7 @@ router.post(
   authorizeRole("SUPER_ADMIN", "BRANCH_MANAGER"),
   asyncHandler(async (req, res) => {
     const party = db.prepare("SELECT * FROM parties WHERE id = ?").get(req.params.partyId);
-    if (!party) return fail(res, "Party not found.", 404);
+    if (!party || party.company_id !== req.companyId) return fail(res, "Party not found.", 404);
     db.prepare("UPDATE party_portal_access SET revoked = 1 WHERE party_id = ? AND revoked = 0").run(party.id);
     logAudit({ user: req.user, action: "Revoked party portal access", entity: "party", entityId: party.id, details: { party_name: party.party_name } });
     ok(res, { revoked: true });
@@ -109,7 +102,9 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
-// PORTAL-FACING: no admin auth. These are what the party themselves hits.
+// PORTAL-FACING: no admin auth. Isolation here doesn't rely on company_id —
+// a login/magic-link always resolves to exactly one party_portal_access row
+// via a globally unique username or token, already scoped to one party.
 // ---------------------------------------------------------------------------
 function issuePortalToken(access) {
   const secondsRemaining = Math.max(1, Math.floor((new Date(access.expires_at).getTime() - Date.now()) / 1000));
@@ -181,7 +176,7 @@ router.get(
     const availableCredit =
       db.prepare("SELECT COALESCE(SUM(credit_remaining),0) s FROM invoices WHERE party_id = ? AND type = 'CreditNote' AND status != 'Cancelled'").get(party.id).s || 0;
     const outstanding = invoices.reduce((s, i) => s + i.balance, 0);
-    const company = db.prepare("SELECT name, currency_symbol, logo FROM companies WHERE id = 'default'").get();
+    const company = db.prepare("SELECT name, currency_symbol, logo FROM companies WHERE id = ?").get(party.company_id);
 
     ok(res, {
       party,

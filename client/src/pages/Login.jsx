@@ -94,12 +94,9 @@ export default function Login() {
           </Button>
         </form>
 
-        {/* "Create Account" only ever does something the first time this app
-            is ever run — /setup is permanently locked out (redirects back to
-            /login) the moment a Super Admin account already exists, so this
-            link is effectively a no-op after that point rather than a way to
-            register a second account. Left visible per request; if that's
-            not the intended behavior, this is the line to gate/remove. */}
+        {/* Multi-tenant sign-up: creates a brand new, fully isolated company
+            + admin account. Always works, for anyone, at any time — not
+            gated behind "is this the first account on the system" anymore. */}
         <Link
           to="/setup"
           className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-stone-800 bg-stone-900/60 px-4 py-2.5 text-sm font-medium text-stone-300 backdrop-blur transition-colors hover:bg-stone-800"
